@@ -95,6 +95,18 @@ def load_settings() -> dict[str, object]:
             os.getenv("LOG_DELIVERY_ACTIVITY"),
             default=False,
         ),
+        # IMAP receiving configuration
+        "imap_enabled": get_bool("imap", "enabled", os.getenv("IMAP_ENABLED"), default=False),
+        "imap_poll_interval": get_float("imap", "poll_interval_seconds", os.getenv("IMAP_POLL_INTERVAL"), default=60.0),
+        "imap_message_retention_seconds": get_int("imap", "message_retention_seconds", os.getenv("IMAP_MESSAGE_RETENTION_SECONDS"), default=300),
+        "imap_attachment_retention_seconds": get_int("imap", "attachment_retention_seconds", os.getenv("IMAP_ATTACHMENT_RETENTION_SECONDS"), default=600),
+        "s3_bucket": get("imap", "s3_bucket", os.getenv("S3_BUCKET")),
+        "s3_region": get("imap", "s3_region", os.getenv("S3_REGION"), default="eu-west-1"),
+        "s3_access_key": get("imap", "s3_access_key", os.getenv("S3_ACCESS_KEY")),
+        "s3_secret_key": get("imap", "s3_secret_key", os.getenv("S3_SECRET_KEY")),
+        "s3_endpoint_url": get("imap", "s3_endpoint_url", os.getenv("S3_ENDPOINT_URL")),
+        "s3_path_prefix": get("imap", "s3_path_prefix", os.getenv("S3_PATH_PREFIX"), default="received/"),
+        "attachment_inline_max_size": get_int("imap", "attachment_inline_max_size", os.getenv("ATTACHMENT_INLINE_MAX_SIZE"), default=512 * 1024),
     }
 
     db_path = settings["db_path"]
@@ -120,6 +132,18 @@ async def run_service(settings: dict[str, object]):
         batch_size_per_account=settings.get("batch_size_per_account"),
         test_mode=bool(settings.get("test_mode")),
         log_delivery_activity=bool(settings.get("log_delivery_activity")),
+        # IMAP receiving
+        imap_enabled=bool(settings.get("imap_enabled")),
+        imap_poll_interval=settings.get("imap_poll_interval"),
+        imap_message_retention_seconds=settings.get("imap_message_retention_seconds"),
+        imap_attachment_retention_seconds=settings.get("imap_attachment_retention_seconds"),
+        s3_bucket=settings.get("s3_bucket"),
+        s3_region=settings.get("s3_region"),
+        s3_access_key=settings.get("s3_access_key"),
+        s3_secret_key=settings.get("s3_secret_key"),
+        s3_endpoint_url=settings.get("s3_endpoint_url"),
+        s3_path_prefix=settings.get("s3_path_prefix"),
+        attachment_inline_max_size=settings.get("attachment_inline_max_size"),
     )
     send_loop_interval = settings.get("send_loop_interval")
     if send_loop_interval is not None:
@@ -145,6 +169,18 @@ if __name__ == "__main__":
         batch_size_per_account=settings.get("batch_size_per_account"),
         test_mode=bool(settings.get("test_mode")),
         log_delivery_activity=bool(settings.get("log_delivery_activity")),
+        # IMAP receiving
+        imap_enabled=bool(settings.get("imap_enabled")),
+        imap_poll_interval=settings.get("imap_poll_interval"),
+        imap_message_retention_seconds=settings.get("imap_message_retention_seconds"),
+        imap_attachment_retention_seconds=settings.get("imap_attachment_retention_seconds"),
+        s3_bucket=settings.get("s3_bucket"),
+        s3_region=settings.get("s3_region"),
+        s3_access_key=settings.get("s3_access_key"),
+        s3_secret_key=settings.get("s3_secret_key"),
+        s3_endpoint_url=settings.get("s3_endpoint_url"),
+        s3_path_prefix=settings.get("s3_path_prefix"),
+        attachment_inline_max_size=settings.get("attachment_inline_max_size"),
     )
     send_loop_interval = settings.get("send_loop_interval")
     if send_loop_interval is not None:
