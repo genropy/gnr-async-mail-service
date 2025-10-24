@@ -44,6 +44,27 @@ class Persistence:
                 await db.execute("ALTER TABLE accounts ADD COLUMN batch_size INTEGER")
             except aiosqlite.OperationalError:
                 pass
+            # IMAP receiving columns
+            try:
+                await db.execute("ALTER TABLE accounts ADD COLUMN is_receive_account INTEGER DEFAULT 0")
+            except aiosqlite.OperationalError:
+                pass
+            try:
+                await db.execute("ALTER TABLE accounts ADD COLUMN imap_host TEXT")
+            except aiosqlite.OperationalError:
+                pass
+            try:
+                await db.execute("ALTER TABLE accounts ADD COLUMN imap_port INTEGER")
+            except aiosqlite.OperationalError:
+                pass
+            try:
+                await db.execute("ALTER TABLE accounts ADD COLUMN imap_ssl INTEGER DEFAULT 1")
+            except aiosqlite.OperationalError:
+                pass
+            try:
+                await db.execute("ALTER TABLE accounts ADD COLUMN imap_folder TEXT DEFAULT 'INBOX'")
+            except aiosqlite.OperationalError:
+                pass
 
             await db.execute(
                 """
@@ -73,6 +94,48 @@ class Persistence:
                     error_ts INTEGER,
                     error TEXT,
                     reported_ts INTEGER
+                )
+                """
+            )
+
+            # IMAP receiving: buffer for received messages
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS received_messages (
+                    id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    imap_uid INTEGER NOT NULL,
+                    message_id TEXT,
+                    from_address TEXT,
+                    from_name TEXT,
+                    to_address TEXT,
+                    cc_address TEXT,
+                    bcc_address TEXT,
+                    subject TEXT,
+                    body_html TEXT,
+                    body_plain TEXT,
+                    send_date TEXT,
+                    received_ts INTEGER NOT NULL,
+                    has_attachments INTEGER DEFAULT 0,
+                    attachment_count INTEGER DEFAULT 0,
+                    attachments TEXT,
+                    headers TEXT,
+                    synced_ts INTEGER,
+                    UNIQUE(account_id, imap_uid)
+                )
+                """
+            )
+
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_received_synced ON received_messages(synced_ts) WHERE synced_ts IS NULL")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_received_cleanup ON received_messages(synced_ts) WHERE synced_ts IS NOT NULL")
+
+            # IMAP sync state: track last UID per account
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS imap_sync_state (
+                    account_id TEXT PRIMARY KEY,
+                    last_uid INTEGER,
+                    last_sync_ts INTEGER
                 )
                 """
             )
@@ -421,4 +484,120 @@ class Persistence:
             ) as cur:
                 row = await cur.fetchone()
         return int(row[0] if row else 0)
+
+    # IMAP Receiving -----------------------------------------------------------
+    async def list_receive_accounts(self) -> List[Dict[str, Any]]:
+        """Return all accounts configured for IMAP receiving."""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """
+                SELECT id, host, port, user, password, imap_host, imap_port, imap_ssl, imap_folder
+                FROM accounts
+                WHERE is_receive_account = 1
+                """
+            ) as cur:
+                rows = await cur.fetchall()
+                cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, row)) for row in rows]
+
+    async def insert_received_message(self, message: Dict[str, Any]) -> None:
+        """Store a received message in the buffer."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO received_messages
+                (id, account_id, imap_uid, message_id, from_address, from_name,
+                 to_address, cc_address, bcc_address, subject, body_html, body_plain,
+                 send_date, received_ts, has_attachments, attachment_count, attachments, headers)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message['id'],
+                    message['account_id'],
+                    message['imap_uid'],
+                    message.get('message_id'),
+                    message.get('from_address'),
+                    message.get('from_name'),
+                    message.get('to_address'),
+                    message.get('cc_address'),
+                    message.get('bcc_address'),
+                    message.get('subject'),
+                    message.get('body_html'),
+                    message.get('body_plain'),
+                    message.get('send_date'),
+                    message['received_ts'],
+                    message.get('has_attachments', 0),
+                    message.get('attachment_count', 0),
+                    message.get('attachments'),
+                    message.get('headers'),
+                )
+            )
+            await db.commit()
+
+    async def fetch_received_messages(self, limit: int) -> List[Dict[str, Any]]:
+        """Return received messages that need to be synced to client."""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """
+                SELECT id, account_id, imap_uid, message_id, from_address, from_name,
+                       to_address, cc_address, bcc_address, subject, body_html, body_plain,
+                       send_date, has_attachments, attachment_count, attachments, headers
+                FROM received_messages
+                WHERE synced_ts IS NULL
+                ORDER BY received_ts ASC
+                LIMIT ?
+                """,
+                (limit,)
+            ) as cur:
+                rows = await cur.fetchall()
+                cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, row)) for row in rows]
+
+    async def mark_received_synced(self, message_ids: Iterable[str], synced_ts: int) -> None:
+        """Mark received messages as synced to client."""
+        ids = [mid for mid in message_ids if mid]
+        if not ids:
+            return
+        placeholders = ",".join("?" for _ in ids)
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                f"UPDATE received_messages SET synced_ts=? WHERE id IN ({placeholders})",
+                (synced_ts, *ids),
+            )
+            await db.commit()
+
+    async def cleanup_synced_received_messages(self, older_than_seconds: int) -> int:
+        """Delete received messages synced more than X seconds ago."""
+        import time
+        threshold = int(time.time()) - older_than_seconds
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "DELETE FROM received_messages WHERE synced_ts IS NOT NULL AND synced_ts < ?",
+                (threshold,)
+            )
+            await db.commit()
+            return cursor.rowcount
+
+    async def get_imap_last_uid(self, account_id: str) -> Optional[int]:
+        """Get the last processed UID for an IMAP account."""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT last_uid FROM imap_sync_state WHERE account_id=?",
+                (account_id,)
+            ) as cur:
+                row = await cur.fetchone()
+        return int(row[0]) if row and row[0] else None
+
+    async def update_imap_last_uid(self, account_id: str, last_uid: int) -> None:
+        """Update the last processed UID for an IMAP account."""
+        import time
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO imap_sync_state (account_id, last_uid, last_sync_ts)
+                VALUES (?, ?, ?)
+                """,
+                (account_id, last_uid, int(time.time()))
+            )
+            await db.commit()
 

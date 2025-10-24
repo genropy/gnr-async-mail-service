@@ -137,6 +137,17 @@ class AsyncMailCore:
         log_delivery_activity: bool = False,
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_delays: Optional[List[int]] = None,
+        imap_enabled: bool = False,
+        imap_poll_interval: float = 60.0,
+        imap_message_retention_seconds: int = 300,
+        imap_attachment_retention_seconds: int = 600,
+        s3_bucket: str | None = None,
+        s3_region: str = 'eu-west-1',
+        s3_access_key: str | None = None,
+        s3_secret_key: str | None = None,
+        s3_endpoint_url: str | None = None,
+        s3_path_prefix: str = 'received/',
+        attachment_inline_max_size: int = 512 * 1024,
     ):
         """Prepare the runtime collaborators and scheduler state."""
         self.default_host = None
@@ -184,6 +195,27 @@ class AsyncMailCore:
         self._max_retries = max(0, int(max_retries))
         self._retry_delays = retry_delays or DEFAULT_RETRY_DELAYS
         self._batch_size_per_account = max(1, int(batch_size_per_account))
+
+        # IMAP receiving configuration
+        self._imap_enabled = bool(imap_enabled)
+        self._imap_poll_interval = max(10.0, float(imap_poll_interval))  # Min 10s
+        self._imap_message_retention_seconds = max(60, int(imap_message_retention_seconds))
+        self._imap_attachment_retention_seconds = max(60, int(imap_attachment_retention_seconds))
+        self._task_imap: Optional[asyncio.Task] = None
+
+        # S3 attachment storage (if configured)
+        self._s3_storage = None
+        if self._imap_enabled and s3_bucket and s3_access_key and s3_secret_key:
+            from .s3_attachment_storage import S3AttachmentStorage
+            self._s3_storage = S3AttachmentStorage(
+                bucket=s3_bucket,
+                region=s3_region,
+                access_key=s3_access_key,
+                secret_key=s3_secret_key,
+                endpoint_url=s3_endpoint_url,
+                path_prefix=s3_path_prefix,
+                inline_max_size=attachment_inline_max_size
+            )
 
     # --------------------------------------------------------------------- utils
     @staticmethod
@@ -393,6 +425,9 @@ class AsyncMailCore:
         if not self._test_mode:
             self.logger.debug("Creating cleanup loop task...")
             self._task_cleanup = asyncio.create_task(self._cleanup_loop(), name="smtp-cleanup-loop")
+        if self._imap_enabled:
+            self.logger.debug("Creating IMAP receive loop task...")
+            self._task_imap = asyncio.create_task(self._imap_receive_loop(), name="imap-receive-loop")
         self.logger.debug("All background tasks created")
 
     async def stop(self) -> None:
@@ -401,7 +436,7 @@ class AsyncMailCore:
         self._wake_event.set()
         self._wake_client_event.set()
         await asyncio.gather(
-            *(task for task in [self._task_smtp, self._task_client, self._task_cleanup] if task),
+            *(task for task in [self._task_smtp, self._task_client, self._task_cleanup, self._task_imap] if task),
             return_exceptions=True,
         )
 
@@ -674,16 +709,24 @@ class AsyncMailCore:
             await self._wait_for_client_wakeup(interval)
 
     async def _process_client_cycle(self) -> None:
-        """Perform one delivery report cycle."""
+        """Perform one delivery report cycle and sync received messages."""
         if not self._active:
             return
 
+        # Fetch outbound delivery reports
         reports = await self.persistence.fetch_reports(self._smtp_batch_size)
-        if not reports:
+
+        # Fetch inbound received messages (if IMAP enabled)
+        received = []
+        if self._imap_enabled:
+            received = await self.persistence.fetch_received_messages(self._smtp_batch_size)
+
+        # If nothing to sync, apply retention and return
+        if not reports and not received:
             # Still allow the client sync endpoint to trigger its own fetch if needed
             if self._client_sync_url and self._report_delivery_callable is None:
                 try:
-                    await self._send_delivery_reports([])
+                    await self._send_delivery_reports([], [])
                 except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                     self.logger.warning(
                         "Client sync endpoint %s not reachable: %s",
@@ -693,7 +736,8 @@ class AsyncMailCore:
             await self._apply_retention()
             return
 
-        payloads = [
+        # Build delivery report payloads
+        report_payloads = [
             {
                 "id": item.get("id"),
                 "account_id": item.get("account_id"),
@@ -705,24 +749,65 @@ class AsyncMailCore:
             }
             for item in reports
         ]
+
+        # Build received message payloads
+        import json
+        received_payloads = [
+            {
+                "id": item.get("id"),
+                "account_id": item.get("account_id"),
+                "imap_uid": item.get("imap_uid"),
+                "message_id": item.get("message_id"),
+                "from_address": item.get("from_address"),
+                "from_name": item.get("from_name"),
+                "to_address": json.loads(item["to_address"]) if item.get("to_address") else [],
+                "cc_address": json.loads(item["cc_address"]) if item.get("cc_address") else [],
+                "bcc_address": json.loads(item["bcc_address"]) if item.get("bcc_address") else [],
+                "subject": item.get("subject"),
+                "body_html": item.get("body_html"),
+                "body_plain": item.get("body_plain"),
+                "send_date": item.get("send_date"),
+                "has_attachments": bool(item.get("has_attachments")),
+                "attachment_count": item.get("attachment_count", 0),
+                "attachments": json.loads(item["attachments"]) if item.get("attachments") else [],
+                "headers": json.loads(item["headers"]) if item.get("headers") else {},
+            }
+            for item in received
+        ]
+
+        # Send to client
         try:
-            await self._send_delivery_reports(payloads)
+            await self._send_delivery_reports(report_payloads, received_payloads)
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             target = self._client_sync_url or "custom callable"
             self.logger.warning("Client sync delivery failed (%s): %s", target, exc)
             return
-        reported_ts = self._utc_now_epoch()
-        await self.persistence.mark_reported((item["id"] for item in reports), reported_ts)
+
+        # Mark as synced
+        synced_ts = self._utc_now_epoch()
+        if reports:
+            await self.persistence.mark_reported((item["id"] for item in reports), synced_ts)
+        if received:
+            await self.persistence.mark_received_synced((item["id"] for item in received), synced_ts)
+
         await self._apply_retention()
 
     async def _apply_retention(self) -> None:
-        """Delete reported messages older than the configured retention."""
-        if self._report_retention_seconds <= 0:
-            return
-        threshold = self._utc_now_epoch() - self._report_retention_seconds
-        removed = await self.persistence.remove_reported_before(threshold)
-        if removed:
-            await self._refresh_queue_gauge()
+        """Delete reported messages and synced received messages older than configured retention."""
+        # Cleanup outbound delivery reports
+        if self._report_retention_seconds > 0:
+            threshold = self._utc_now_epoch() - self._report_retention_seconds
+            removed = await self.persistence.remove_reported_before(threshold)
+            if removed:
+                await self._refresh_queue_gauge()
+
+        # Cleanup inbound received messages
+        if self._imap_enabled and self._imap_message_retention_seconds > 0:
+            removed_received = await self.persistence.cleanup_synced_received_messages(
+                self._imap_message_retention_seconds
+            )
+            if removed_received:
+                self.logger.debug(f"Cleaned up {removed_received} synced received messages")
 
     # ---------------------------------------------------------------- housekeeping
     async def _cleanup_loop(self) -> None:
@@ -730,6 +815,210 @@ class AsyncMailCore:
         while not self._stop.is_set():
             await asyncio.sleep(150)
             await self.pool.cleanup()
+
+    # ----------------------------------------------------------- IMAP receiving
+    async def _imap_receive_loop(self) -> None:
+        """Poll IMAP accounts and buffer received messages."""
+        from .text_extractor import TextExtractor
+        import uuid
+        import json
+
+        text_extractor = TextExtractor()
+
+        while not self._stop.is_set():
+            try:
+                accounts = await self.persistence.list_receive_accounts()
+
+                for account in accounts:
+                    try:
+                        await self._process_imap_account(account, text_extractor)
+                    except Exception as e:
+                        self.logger.exception(f"Error processing IMAP account {account.get('id')}: {e}")
+
+            except Exception as e:
+                self.logger.exception(f"Error in IMAP receive loop: {e}")
+
+            # Poll interval
+            await asyncio.sleep(self._imap_poll_interval)
+
+    async def _process_imap_account(self, account: Dict[str, Any], text_extractor: Any) -> None:
+        """Process a single IMAP account."""
+        import aioimaplib
+        import email
+        from email.header import decode_header
+        import json
+        import uuid
+
+        account_id = account['id']
+        imap_host = account.get('imap_host') or account.get('host')
+        imap_port = account.get('imap_port') or (993 if account.get('imap_ssl', True) else 143)
+        imap_ssl = bool(account.get('imap_ssl', True))
+        imap_folder = account.get('imap_folder', 'INBOX')
+        username = account.get('user')
+        password = account.get('password')
+
+        if not all([imap_host, username, password]):
+            self.logger.warning(f"IMAP account {account_id} missing required credentials")
+            return
+
+        # Connect to IMAP
+        try:
+            if imap_ssl:
+                imap = aioimaplib.IMAP4_SSL(host=imap_host, port=imap_port)
+            else:
+                imap = aioimaplib.IMAP4(host=imap_host, port=imap_port)
+
+            await imap.wait_hello_from_server()
+            await imap.login(username, password)
+            await imap.select(imap_folder)
+
+            # Get last UID
+            last_uid = await self.persistence.get_imap_last_uid(account_id)
+
+            # Search for new messages
+            if last_uid:
+                search_criteria = f'UID {last_uid + 1}:*'
+            else:
+                search_criteria = 'ALL'
+
+            response = await imap.uid('search', None, search_criteria)
+            if response.result != 'OK':
+                self.logger.warning(f"IMAP search failed for {account_id}: {response}")
+                await imap.logout()
+                return
+
+            uids = response.lines[0].decode().split()
+            if not uids:
+                await imap.logout()
+                return
+
+            # Process each message
+            for uid_str in uids:
+                try:
+                    uid = int(uid_str)
+                    await self._fetch_and_store_message(imap, account_id, uid, text_extractor)
+                    last_uid = uid
+                except Exception as e:
+                    self.logger.exception(f"Error fetching message UID {uid_str}: {e}")
+
+            # Update last UID
+            if last_uid:
+                await self.persistence.update_imap_last_uid(account_id, last_uid)
+
+            await imap.logout()
+
+        except Exception as e:
+            self.logger.exception(f"IMAP connection failed for {account_id}: {e}")
+
+    async def _fetch_and_store_message(
+        self,
+        imap: Any,
+        account_id: str,
+        uid: int,
+        text_extractor: Any
+    ) -> None:
+        """Fetch a single message from IMAP and store it."""
+        import email
+        from email.header import decode_header
+        import json
+        import uuid
+
+        # Fetch message
+        response = await imap.uid('fetch', str(uid), '(RFC822)')
+        if response.result != 'OK':
+            return
+
+        # Parse email
+        email_data = response.lines[1]
+        msg = email.message_from_bytes(email_data)
+
+        # Extract headers
+        def decode_header_value(value):
+            if not value:
+                return ''
+            decoded_parts = decode_header(value)
+            return ' '.join([
+                part.decode(encoding or 'utf-8') if isinstance(part, bytes) else part
+                for part, encoding in decoded_parts
+            ])
+
+        from_address = decode_header_value(msg.get('From', ''))
+        to_address = decode_header_value(msg.get('To', ''))
+        subject = decode_header_value(msg.get('Subject', ''))
+        message_id = msg.get('Message-ID', '')
+        date = msg.get('Date', '')
+
+        # Extract body
+        body_html = ''
+        body_plain_native = ''
+        attachments = []
+
+        if msg.is_multipart():
+            for part in msg.walk():
+                content_type = part.get_content_type()
+                content_disposition = str(part.get('Content-Disposition', ''))
+
+                if 'attachment' in content_disposition:
+                    # Handle attachment
+                    filename = part.get_filename()
+                    if filename:
+                        attachments.append({
+                            'filename': decode_header_value(filename),
+                            'payload': part.get_payload(decode=True),
+                            'content_type': content_type
+                        })
+                elif content_type == 'text/plain' and not body_plain_native:
+                    body_plain_native = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                elif content_type == 'text/html' and not body_html:
+                    body_html = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+        else:
+            content_type = msg.get_content_type()
+            payload = msg.get_payload(decode=True)
+            if payload:
+                if content_type == 'text/html':
+                    body_html = payload.decode('utf-8', errors='ignore')
+                else:
+                    body_plain_native = payload.decode('utf-8', errors='ignore')
+
+        # Extract clean plain text
+        body_plain = text_extractor.extract(body_html, body_plain_native)
+
+        # Store attachments in S3
+        attachment_refs = []
+        if attachments and self._s3_storage:
+            try:
+                message_uuid = str(uuid.uuid4())
+                attachment_refs = await self._s3_storage.store_attachments(message_uuid, attachments)
+            except Exception as e:
+                self.logger.exception(f"Failed to store attachments for message {uid}: {e}")
+
+        # Build message record
+        message_record = {
+            'id': message_uuid if attachments else str(uuid.uuid4()),
+            'account_id': account_id,
+            'imap_uid': uid,
+            'message_id': message_id,
+            'from_address': from_address,
+            'from_name': from_address.split('<')[0].strip() if '<' in from_address else from_address,
+            'to_address': json.dumps([to_address]),
+            'subject': subject,
+            'body_html': body_html,
+            'body_plain': body_plain,
+            'send_date': date,
+            'received_ts': self._utc_now_epoch(),
+            'has_attachments': len(attachment_refs) > 0,
+            'attachment_count': len(attachment_refs),
+            'attachments': json.dumps(attachment_refs) if attachment_refs else None,
+            'headers': json.dumps(dict(msg.items())),
+        }
+
+        # Store in buffer
+        await self.persistence.insert_received_message(message_record)
+
+        # Trigger immediate client sync
+        self._wake_client_event.set()
+
+        self.logger.info(f"Received message UID {uid} from {account_id}: {subject}")
 
     async def _refresh_queue_gauge(self) -> None:
         """Refresh the metric describing queued messages."""
@@ -941,8 +1230,15 @@ class AsyncMailCore:
         return content, filename
 
     # ------------------------------------------------------------ client bridge
-    async def _send_delivery_reports(self, payloads: List[Dict[str, Any]]) -> None:
-        """Send delivery report payloads to the configured proxy or callback."""
+    async def _send_delivery_reports(
+        self,
+        payloads: List[Dict[str, Any]],
+        received_payloads: List[Dict[str, Any]] = None
+    ) -> None:
+        """Send delivery report and received message payloads to the configured proxy or callback."""
+        if received_payloads is None:
+            received_payloads = []
+
         if self._report_delivery_callable is not None:
             if self._log_delivery_activity:
                 batch_size = len(payloads)
@@ -960,7 +1256,7 @@ class AsyncMailCore:
                 await self._report_delivery_callable(payload)
             return
         if not self._client_sync_url:
-            if payloads:
+            if payloads or received_payloads:
                 raise RuntimeError("Client sync URL is not configured")
             return
         headers: Dict[str, str] = {}
@@ -969,35 +1265,50 @@ class AsyncMailCore:
             headers["Authorization"] = f"Bearer {self._client_sync_token}"
         elif self._client_sync_user:
             auth = aiohttp.BasicAuth(self._client_sync_user, self._client_sync_password or "")
+
         batch_size = len(payloads)
+        received_count = len(received_payloads)
+
         if self._log_delivery_activity:
             ids_preview = ", ".join(str(item.get("id")) for item in payloads[:5] if item.get("id"))
             if len(payloads) > 5:
                 ids_preview = f"{ids_preview}, ..." if ids_preview else "..."
             self.logger.info(
-                "Posting delivery reports to client sync endpoint %s (count=%d, ids=%s)",
+                "Posting to client sync endpoint %s (reports=%d, received=%d, ids=%s)",
                 self._client_sync_url,
                 batch_size,
+                received_count,
                 ids_preview or "-",
             )
         else:
             self.logger.debug(
-                "Posting delivery reports to client sync endpoint %s (count=%d)",
+                "Posting to client sync endpoint %s (reports=%d, received=%d)",
                 self._client_sync_url,
                 batch_size,
+                received_count,
             )
+
+        # Build payload with both delivery_report and received_messages
+        sync_payload = {"delivery_report": payloads}
+        if received_payloads:
+            sync_payload["received_messages"] = received_payloads
+
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 self._client_sync_url,
-                json={"delivery_report": payloads},
+                json=sync_payload,
                 auth=auth,
                 headers=headers or None,
             ) as resp:
                 resp.raise_for_status()
         if self._log_delivery_activity:
-            self.logger.info("Client sync acknowledged delivery report batch (%d items)", batch_size)
+            self.logger.info(
+                "Client sync acknowledged batch (reports=%d, received=%d)",
+                batch_size,
+                received_count
+            )
         else:
-            self.logger.debug("Delivery report batch delivered (%d items)", batch_size)
+            self.logger.debug("Sync batch delivered (reports=%d, received=%d)", batch_size, received_count)
 
     # ------------------------------------------------------------- validations
     async def _validate_enqueue_payload(self, payload: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
