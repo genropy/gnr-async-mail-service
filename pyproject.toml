@@ -3,7 +3,7 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "gnr-async-mail-service"
+name = "genro-mail-proxy"
 version = "0.1.0"
 description = "Asynchronous email dispatcher microservice with scheduling, rate limiting, attachments, and a FastAPI REST API."
 readme = "README.md"
@@ -54,7 +54,7 @@ docs = [
 ]
 
 [project.urls]
-Documentation = "https://gnr-async-mail-service.readthedocs.io/en/latest/"
+Documentation = "https://genro-mail-proxy.readthedocs.io/en/latest/"
 
 [tool.hatch.build.targets.wheel]
 packages = ["async_mail_service"]

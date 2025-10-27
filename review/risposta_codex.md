@@ -1,4 +1,4 @@
-Osservazioni di Codex su «gnr-async-mail-service»
+Osservazioni di Codex su «genro-mail-proxy»
 =================================================
 
 1. Convergenze con il documento di Claude

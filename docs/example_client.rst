@@ -1,7 +1,7 @@
 Example Client
 ==============
 
-The ``example_client.py`` demonstrates how to integrate your application with gnr-async-mail-service.
+The ``example_client.py`` demonstrates how to integrate your application with genro-mail-proxy.
 
 Overview
 --------
@@ -175,8 +175,7 @@ Integration Flow
             │
             ▼
    ┌──────────────────┐
-   │ gnr-async-mail   │
-   │    -service      │────────► SMTP Server
+   │ genro-mail-proxy │────────► SMTP Server
    └────────┬─────────┘
             │
             │ 3. POST /email/mailproxy/mp_endpoint/proxy_sync
@@ -503,7 +502,7 @@ End-to-End Test
    .. code-block:: bash
 
       # In terminal 1
-      cd /path/to/gnr-async-mail-service
+      cd /path/to/genro-mail-proxy
       python3 main.py
 
 2. **Start example client**:

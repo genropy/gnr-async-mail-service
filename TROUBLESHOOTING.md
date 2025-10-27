@@ -1,6 +1,6 @@
 # Troubleshooting Guide
 
-This guide provides diagnostic tools and procedures for debugging issues with the gnr-async-mail-service SMTP dispatcher.
+This guide provides diagnostic tools and procedures for debugging issues with the genro-mail-proxy SMTP dispatcher.
 
 ## Quick Diagnostics
 

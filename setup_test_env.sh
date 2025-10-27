@@ -1,5 +1,5 @@
 #!/bin/bash
-# Setup clean test environment for gnr-async-mail-service
+# Setup clean test environment for genro-mail-proxy
 
 set -e
 

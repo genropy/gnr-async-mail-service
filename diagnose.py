@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script di diagnostica per gnr-async-mail-service
+Script di diagnostica per genro-mail-proxy
 Controlla lo stato dei messaggi e degli account nel database
 """
 
@@ -14,7 +14,7 @@ DB_PATH = "/tmp/mail_service.db"
 
 async def diagnose():
     print("=" * 80)
-    print("DIAGNOSTICA gnr-async-mail-service")
+    print("DIAGNOSTICA genro-mail-proxy")
     print("=" * 80)
     print(f"\nDatabase: {DB_PATH}\n")
 

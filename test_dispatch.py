@@ -7,7 +7,7 @@ import asyncio
 import aiosqlite
 import json
 import sys
-sys.path.insert(0, '/Users/fporcari/Development/gnr-async-mail-service')
+sys.path.insert(0, '/Users/fporcari/Development/genro-ng/genro-mail-proxy')
 
 from async_mail_service.core import AsyncMailCore
 from async_mail_service.persistence import Persistence

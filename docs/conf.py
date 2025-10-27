@@ -1,7 +1,7 @@
 
 import os, sys
 sys.path.insert(0, os.path.abspath('..'))
-project = "gnr-async-mail-service"
+project = "genro-mail-proxy"
 author = "Softwell S.r.l. & Giovanni Porcari"
 release = "0.1.0"
 extensions = [

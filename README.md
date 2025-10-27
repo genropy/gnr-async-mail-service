@@ -1,6 +1,6 @@
-[![Documentation Status](https://readthedocs.org/projects/gnr-async-mail-service/badge/?version=latest)](https://gnr-async-mail-service.readthedocs.io/en/latest/)
+[![Documentation Status](https://readthedocs.org/projects/genro-mail-proxy/badge/?version=latest)](https://genro-mail-proxy.readthedocs.io/en/latest/)
 
-# gnr-async-mail-service
+# genro-mail-proxy
 
 **Authors:** Softwell S.r.l. - Giovanni Porcari  
 **License:** MIT
@@ -9,7 +9,7 @@ Asynchronous email dispatcher microservice with scheduling, rate limiting, attac
 
 ## Why Use an Email Proxy?
 
-Instead of directly connecting to SMTP servers from your application, gnr-async-mail-service provides a **decoupled, resilient email delivery layer** with:
+Instead of directly connecting to SMTP servers from your application, genro-mail-proxy provides a **decoupled, resilient email delivery layer** with:
 
 - ⚡ **19x faster requests** (32ms vs 620ms) - non-blocking async operations
 - 🔄 **Never lose messages** - automatic retry, guaranteed persistence
@@ -33,8 +33,8 @@ Instead of directly connecting to SMTP servers from your application, gnr-async-
 ## Quick start
 
 ```bash
-docker build -t gnr-async-mail-service .
-docker run -p 8000:8000 -e SMTP_USER=... -e SMTP_PASSWORD=... -e FETCH_URL=https://your/api gnr-async-mail-service
+docker build -t genro-mail-proxy .
+docker run -p 8000:8000 -e SMTP_USER=... -e SMTP_PASSWORD=... -e FETCH_URL=https://your/api genro-mail-proxy
 ```
 
 ## Example client

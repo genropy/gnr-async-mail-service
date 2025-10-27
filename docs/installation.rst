@@ -7,10 +7,10 @@ Docker
 
 .. code-block:: bash
 
-   docker build -t gnr-async-mail-service .
+   docker build -t genro-mail-proxy .
    docker run -p 8000:8000 \\
      -e SMTP_USER=... -e SMTP_PASSWORD=... \\
-     -e FETCH_URL=https://your/api gnr-async-mail-service
+     -e FETCH_URL=https://your/api genro-mail-proxy
 
 Docker Compose
 --------------

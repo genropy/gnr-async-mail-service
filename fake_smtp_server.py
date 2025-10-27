@@ -92,7 +92,7 @@ def main():
     logger.info(f"   Protocol: SMTP (no TLS)")
     logger.info("")
     logger.info("This server accepts all emails without authentication.")
-    logger.info("Perfect for testing gnr-async-mail-service!")
+    logger.info("Perfect for testing genro-mail-proxy!")
     logger.info("")
     logger.info("Press Ctrl+C to stop")
     logger.info("-" * 80)

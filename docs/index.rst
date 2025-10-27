@@ -1,6 +1,6 @@
 
-gnr-async-mail-service
-======================
+genro-mail-proxy
+================
 
 .. image:: _static/logo.png
    :alt: logo

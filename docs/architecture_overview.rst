@@ -1,7 +1,7 @@
 Architecture Overview
 ====================
 
-This document explains the architectural benefits of using gnr-async-mail-service
+This document explains the architectural benefits of using genro-mail-proxy
 as an email proxy instead of directly connecting to SMTP servers from your application.
 
 .. contents::
@@ -22,7 +22,7 @@ to SMTP servers introduces several challenges:
 6. **No centralized monitoring** of email delivery
 7. **Difficult debugging** of delivery issues
 
-gnr-async-mail-service solves these problems by introducing a **decoupled, asynchronous
+genro-mail-proxy solves these problems by introducing a **decoupled, asynchronous
 email delivery layer** that sits between your application and SMTP servers.
 
 Architecture Pattern
@@ -83,7 +83,7 @@ Proxy-Based Architecture
                       │
                       ▼ (async, decoupled)
    ┌─────────────────────────────────────────────────────┐
-   │         gnr-async-mail-service                       │
+   │         genro-mail-proxy                             │
    │                                                      │
    │  ┌────────────┐    ┌──────────────┐                │
    │  │  Messages  │───→│  SMTP Pool   │───→ Send       │
@@ -640,7 +640,7 @@ Comparison Summary
 
    * - Aspect
      - Direct SMTP
-     - gnr-async-mail-service
+     - genro-mail-proxy
    * - **Request Latency**
      - 500-2000ms ❌
      - 20-50ms ✅
@@ -703,11 +703,11 @@ Migration Path
 
 .. code-block:: bash
 
-   # Deploy gnr-async-mail-service
+   # Deploy genro-mail-proxy
    docker run -p 8000:8000 \
      -v /data:/data \
      -e API_TOKEN=secret \
-     gnr-async-mail-service
+     genro-mail-proxy
 
 **Step 2: Add SMTP Account**
 
@@ -765,7 +765,7 @@ Migration Path
 Conclusion
 ----------
 
-gnr-async-mail-service provides a **production-ready email delivery layer** that
+genro-mail-proxy provides a **production-ready email delivery layer** that
 solves common problems in enterprise email sending:
 
 1. ⚡ **Performance** - 10-50x faster via connection pooling
