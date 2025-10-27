@@ -140,6 +140,28 @@ class Persistence:
                 """
             )
 
+            # Bounce reports: track delivery failures
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bounce_reports (
+                    id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    original_message_id TEXT,
+                    bounce_type TEXT NOT NULL,
+                    smtp_code INTEGER,
+                    failed_recipient TEXT,
+                    reason TEXT,
+                    received_message_id TEXT,
+                    detected_ts INTEGER NOT NULL,
+                    synced_ts INTEGER,
+                    FOREIGN KEY (received_message_id) REFERENCES received_messages(id)
+                )
+                """
+            )
+
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_bounce_synced ON bounce_reports(synced_ts) WHERE synced_ts IS NULL")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_bounce_original ON bounce_reports(original_message_id)")
+
             await db.commit()
 
     # Accounts -----------------------------------------------------------------
@@ -600,4 +622,72 @@ class Persistence:
                 (account_id, last_uid, int(time.time()))
             )
             await db.commit()
+
+    # Bounce Reports -----------------------------------------------------------
+    async def insert_bounce_report(self, bounce: Dict[str, Any]) -> None:
+        """Store a detected bounce report."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO bounce_reports
+                (id, account_id, original_message_id, bounce_type, smtp_code,
+                 failed_recipient, reason, received_message_id, detected_ts)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    bounce['id'],
+                    bounce['account_id'],
+                    bounce.get('original_message_id'),
+                    bounce['bounce_type'],
+                    bounce.get('smtp_code'),
+                    bounce.get('failed_recipient'),
+                    bounce.get('reason'),
+                    bounce.get('received_message_id'),
+                    bounce['detected_ts']
+                )
+            )
+            await db.commit()
+
+    async def fetch_bounce_reports(self, limit: int) -> List[Dict[str, Any]]:
+        """Return bounce reports that need to be synced to client."""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """
+                SELECT id, account_id, original_message_id, bounce_type, smtp_code,
+                       failed_recipient, reason, received_message_id, detected_ts
+                FROM bounce_reports
+                WHERE synced_ts IS NULL
+                ORDER BY detected_ts ASC
+                LIMIT ?
+                """,
+                (limit,)
+            ) as cur:
+                rows = await cur.fetchall()
+                cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, row)) for row in rows]
+
+    async def mark_bounces_synced(self, bounce_ids: Iterable[str], synced_ts: int) -> None:
+        """Mark bounce reports as synced to client."""
+        ids = [bid for bid in bounce_ids if bid]
+        if not ids:
+            return
+        placeholders = ",".join("?" for _ in ids)
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                f"UPDATE bounce_reports SET synced_ts=? WHERE id IN ({placeholders})",
+                (synced_ts, *ids),
+            )
+            await db.commit()
+
+    async def cleanup_synced_bounces(self, older_than_seconds: int) -> int:
+        """Delete bounce reports synced more than X seconds ago."""
+        import time
+        threshold = int(time.time()) - older_than_seconds
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "DELETE FROM bounce_reports WHERE synced_ts IS NOT NULL AND synced_ts < ?",
+                (threshold,)
+            )
+            await db.commit()
+            return cursor.rowcount
 

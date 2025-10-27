@@ -107,6 +107,9 @@ def load_settings() -> dict[str, object]:
         "s3_endpoint_url": get("imap", "s3_endpoint_url", os.getenv("S3_ENDPOINT_URL")),
         "s3_path_prefix": get("imap", "s3_path_prefix", os.getenv("S3_PATH_PREFIX"), default="received/"),
         "attachment_inline_max_size": get_int("imap", "attachment_inline_max_size", os.getenv("ATTACHMENT_INLINE_MAX_SIZE"), default=512 * 1024),
+        # Bounce detection configuration
+        "bounce_detection_enabled": get_bool("bounce_detection", "enabled", os.getenv("BOUNCE_DETECTION_ENABLED"), default=False),
+        "bounce_retention_seconds": get_int("bounce_detection", "retention_seconds", os.getenv("BOUNCE_RETENTION_SECONDS"), default=7 * 24 * 3600),
     }
 
     db_path = settings["db_path"]
@@ -144,6 +147,9 @@ async def run_service(settings: dict[str, object]):
         s3_endpoint_url=settings.get("s3_endpoint_url"),
         s3_path_prefix=settings.get("s3_path_prefix"),
         attachment_inline_max_size=settings.get("attachment_inline_max_size"),
+        # Bounce detection
+        bounce_detection_enabled=bool(settings.get("bounce_detection_enabled")),
+        bounce_retention_seconds=settings.get("bounce_retention_seconds"),
     )
     send_loop_interval = settings.get("send_loop_interval")
     if send_loop_interval is not None:
@@ -181,6 +187,9 @@ if __name__ == "__main__":
         s3_endpoint_url=settings.get("s3_endpoint_url"),
         s3_path_prefix=settings.get("s3_path_prefix"),
         attachment_inline_max_size=settings.get("attachment_inline_max_size"),
+        # Bounce detection
+        bounce_detection_enabled=bool(settings.get("bounce_detection_enabled")),
+        bounce_retention_seconds=settings.get("bounce_retention_seconds"),
     )
     send_loop_interval = settings.get("send_loop_interval")
     if send_loop_interval is not None:

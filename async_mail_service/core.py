@@ -148,6 +148,8 @@ class AsyncMailCore:
         s3_endpoint_url: str | None = None,
         s3_path_prefix: str = 'received/',
         attachment_inline_max_size: int = 512 * 1024,
+        bounce_detection_enabled: bool = False,
+        bounce_retention_seconds: int = 604800,
     ):
         """Prepare the runtime collaborators and scheduler state."""
         self.default_host = None
@@ -216,6 +218,10 @@ class AsyncMailCore:
                 path_prefix=s3_path_prefix,
                 inline_max_size=attachment_inline_max_size
             )
+
+        # Bounce detection configuration
+        self._bounce_detection_enabled = bool(bounce_detection_enabled) and self._imap_enabled
+        self._bounce_retention_seconds = max(60, int(bounce_retention_seconds))
 
     # --------------------------------------------------------------------- utils
     @staticmethod
@@ -721,12 +727,17 @@ class AsyncMailCore:
         if self._imap_enabled:
             received = await self.persistence.fetch_received_messages(self._smtp_batch_size)
 
+        # Fetch bounce reports (if bounce detection enabled)
+        bounces = []
+        if self._bounce_detection_enabled:
+            bounces = await self.persistence.fetch_bounce_reports(self._smtp_batch_size)
+
         # If nothing to sync, apply retention and return
-        if not reports and not received:
+        if not reports and not received and not bounces:
             # Still allow the client sync endpoint to trigger its own fetch if needed
             if self._client_sync_url and self._report_delivery_callable is None:
                 try:
-                    await self._send_delivery_reports([], [])
+                    await self._send_delivery_reports([], [], [])
                 except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                     self.logger.warning(
                         "Client sync endpoint %s not reachable: %s",
@@ -775,9 +786,25 @@ class AsyncMailCore:
             for item in received
         ]
 
+        # Build bounce report payloads
+        bounce_payloads = [
+            {
+                "id": item.get("id"),
+                "account_id": item.get("account_id"),
+                "original_message_id": item.get("original_message_id"),
+                "bounce_type": item.get("bounce_type"),
+                "smtp_code": item.get("smtp_code"),
+                "failed_recipient": item.get("failed_recipient"),
+                "reason": item.get("reason"),
+                "received_message_id": item.get("received_message_id"),
+                "detected_ts": item.get("detected_ts"),
+            }
+            for item in bounces
+        ]
+
         # Send to client
         try:
-            await self._send_delivery_reports(report_payloads, received_payloads)
+            await self._send_delivery_reports(report_payloads, received_payloads, bounce_payloads)
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             target = self._client_sync_url or "custom callable"
             self.logger.warning("Client sync delivery failed (%s): %s", target, exc)
@@ -789,6 +816,8 @@ class AsyncMailCore:
             await self.persistence.mark_reported((item["id"] for item in reports), synced_ts)
         if received:
             await self.persistence.mark_received_synced((item["id"] for item in received), synced_ts)
+        if bounces:
+            await self.persistence.mark_bounces_synced((item["id"] for item in bounces), synced_ts)
 
         await self._apply_retention()
 
@@ -808,6 +837,14 @@ class AsyncMailCore:
             )
             if removed_received:
                 self.logger.debug(f"Cleaned up {removed_received} synced received messages")
+
+        # Cleanup bounce reports
+        if self._bounce_detection_enabled and self._bounce_retention_seconds > 0:
+            removed_bounces = await self.persistence.cleanup_synced_bounces(
+                self._bounce_retention_seconds
+            )
+            if removed_bounces:
+                self.logger.debug(f"Cleaned up {removed_bounces} synced bounce reports")
 
     # ---------------------------------------------------------------- housekeeping
     async def _cleanup_loop(self) -> None:
@@ -922,6 +959,7 @@ class AsyncMailCore:
         from email.header import decode_header
         import json
         import uuid
+        from .bounce_detection import parse_bounce_message
 
         # Fetch message
         response = await imap.uid('fetch', str(uid), '(RFC822)')
@@ -1014,6 +1052,28 @@ class AsyncMailCore:
 
         # Store in buffer
         await self.persistence.insert_received_message(message_record)
+
+        # Check if this is a bounce message
+        if self._bounce_detection_enabled:
+            bounce_info = parse_bounce_message(msg, body_plain)
+            if bounce_info:
+                # Create bounce report record
+                bounce_record = {
+                    'id': str(uuid.uuid4()),
+                    'account_id': account_id,
+                    'original_message_id': bounce_info.get('original_message_id'),
+                    'bounce_type': bounce_info['bounce_type'],
+                    'smtp_code': bounce_info.get('smtp_code'),
+                    'failed_recipient': bounce_info.get('failed_recipient'),
+                    'reason': bounce_info.get('reason'),
+                    'received_message_id': message_record['id'],
+                    'detected_ts': self._utc_now_epoch()
+                }
+                await self.persistence.insert_bounce_report(bounce_record)
+                self.logger.info(
+                    f"Detected {bounce_info['bounce_type']} bounce for message {bounce_info.get('original_message_id')} "
+                    f"from {account_id}: {bounce_info.get('reason')}"
+                )
 
         # Trigger immediate client sync
         self._wake_client_event.set()
@@ -1233,11 +1293,14 @@ class AsyncMailCore:
     async def _send_delivery_reports(
         self,
         payloads: List[Dict[str, Any]],
-        received_payloads: List[Dict[str, Any]] = None
+        received_payloads: List[Dict[str, Any]] = None,
+        bounce_payloads: List[Dict[str, Any]] = None
     ) -> None:
-        """Send delivery report and received message payloads to the configured proxy or callback."""
+        """Send delivery report, received message, and bounce report payloads to the configured proxy or callback."""
         if received_payloads is None:
             received_payloads = []
+        if bounce_payloads is None:
+            bounce_payloads = []
 
         if self._report_delivery_callable is not None:
             if self._log_delivery_activity:
@@ -1256,7 +1319,7 @@ class AsyncMailCore:
                 await self._report_delivery_callable(payload)
             return
         if not self._client_sync_url:
-            if payloads or received_payloads:
+            if payloads or received_payloads or bounce_payloads:
                 raise RuntimeError("Client sync URL is not configured")
             return
         headers: Dict[str, str] = {}
@@ -1268,30 +1331,35 @@ class AsyncMailCore:
 
         batch_size = len(payloads)
         received_count = len(received_payloads)
+        bounce_count = len(bounce_payloads)
 
         if self._log_delivery_activity:
             ids_preview = ", ".join(str(item.get("id")) for item in payloads[:5] if item.get("id"))
             if len(payloads) > 5:
                 ids_preview = f"{ids_preview}, ..." if ids_preview else "..."
             self.logger.info(
-                "Posting to client sync endpoint %s (reports=%d, received=%d, ids=%s)",
+                "Posting to client sync endpoint %s (reports=%d, received=%d, bounces=%d, ids=%s)",
                 self._client_sync_url,
                 batch_size,
                 received_count,
+                bounce_count,
                 ids_preview or "-",
             )
         else:
             self.logger.debug(
-                "Posting to client sync endpoint %s (reports=%d, received=%d)",
+                "Posting to client sync endpoint %s (reports=%d, received=%d, bounces=%d)",
                 self._client_sync_url,
                 batch_size,
                 received_count,
+                bounce_count,
             )
 
-        # Build payload with both delivery_report and received_messages
+        # Build payload with delivery_report, received_messages, and bounce_report
         sync_payload = {"delivery_report": payloads}
         if received_payloads:
             sync_payload["received_messages"] = received_payloads
+        if bounce_payloads:
+            sync_payload["bounce_report"] = bounce_payloads
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -1303,12 +1371,13 @@ class AsyncMailCore:
                 resp.raise_for_status()
         if self._log_delivery_activity:
             self.logger.info(
-                "Client sync acknowledged batch (reports=%d, received=%d)",
+                "Client sync acknowledged batch (reports=%d, received=%d, bounces=%d)",
                 batch_size,
-                received_count
+                received_count,
+                bounce_count
             )
         else:
-            self.logger.debug("Sync batch delivered (reports=%d, received=%d)", batch_size, received_count)
+            self.logger.debug("Sync batch delivered (reports=%d, received=%d, bounces=%d)", batch_size, received_count, bounce_count)
 
     # ------------------------------------------------------------- validations
     async def _validate_enqueue_payload(self, payload: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
