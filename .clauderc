@@ -1,0 +1,17 @@
+# Project-specific instructions for Claude Code
+
+## Language Policy
+- All code, comments, and commit messages MUST be written in English
+- Documentation should be in English unless explicitly requested otherwise
+
+## Git Commit Authorship
+- NEVER include Claude as a co-author in commits
+- Always remove the "Co-Authored-By: Claude <noreply@anthropic.com>" line from commit messages
+- Use standard git commit format without AI attribution
+
+## Project Status: Beta
+This project is currently in BETA status. While in beta:
+- Do NOT reference or discuss migration paths from previous versions in documentation
+- Backward compatibility is NOT a concern and should not be maintained
+- Breaking changes are acceptable and do not require special consideration
+- Focus on stability and feature completeness rather than compatibility with older versions
